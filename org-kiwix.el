@@ -1,6 +1,14 @@
 ;;; org-kiwix.el --- Org Mode link support -*- lexical-binding: t; -*-
 
-;;; Time-stamp: <2020-12-29 17:50:34 stardiviner>
+;;; Time-stamp: <2021-01-14 02:33:56 stardiviner>
+
+;; Author: stardiviner <numbchild@gmail.com>
+;; Maintainer: stardiviner <numbchild@gmail.com>
+;; Keywords: kiwix wikipedia
+;; Homepage: https://github.com/stardiviner/kiwix.el
+;; Created: 23th July 2016
+;; Version: 1.0.3
+;; Package-Requires: ((emacs "26.1"))
 
 ;; Copyright (C) 2019-2020  Free Software Foundation, Inc.
 
@@ -50,36 +58,36 @@
 (autoload 'org-link-set-parameters "org")
 (autoload 'org-store-link-props "org")
 
-(defun chinese-string-p (string)
+(defun org-kiwix--chinese-string-p (string)
   "Return t if STRING is a Chinese string."
   (if (string-match (format "\\cC\\{%s\\}" (length string)) string)
       t
     nil))
 
-(defun kiwix-org-get-library (link)
+(defun org-kiwix-get-library (link)
   "Get library from Org-mode `LINK'."
   (let ((library (catch 'args-out-of-range
                    (when (string-match "(\\([^)].*\\)):\\(.*\\)" link)
                      (match-string 1 link)))))
     (or library
         (cond
-         ((chinese-string-p link)
+         ((org-kiwix--chinese-string-p link)
           (kiwix-select-library "zh"))
          ((string-match-p "[a-zA-Z\ ]+" link)
           ;; convert between libraries full name and abbrev.
           (kiwix-select-library "en"))
          (t (kiwix-select-library))))))
 
-(defun org-wikipedia-open-link (link)
+(defun org-kiwix-open-link (link)
   "Open LINK in external Wikipedia program."
   ;; The regexp: (library):query
   ;; - query : should not exclude space
   ;; match link spec: "(library):query" with regexp "([^).]*):?:.*"
   ;; (string-match "\\(?:(\\(.*\\)):\\)?\\([^]\n\t\r]*\\)"  link)
   (string-match "(\\([^)].*\\)):\\(.*\\)" link)
-  (let* ((library (kiwix-org-get-library link))
+  (let* ((library (org-kiwix-get-library link))
          (query (cond
-                 ((chinese-string-p link) link)
+                 ((org-kiwix--chinese-string-p link) link)
                  ((string-match-p "(\\([^)].*\\)):\\(.*\\)" link)
                   (match-string 2 link))
                  (t link)))
@@ -98,10 +106,10 @@
     ;; (prin1 (format "library: %s, query: %s, url: %s" library query url))
     (browse-url url)))
 
-(defun org-wikipedia-export-link (link description format)
+(defun org-kiwix-export-link (link description format)
   "Export the Wikipedia LINK with DESCRIPTION for FORMAT from Org files."
   (when (string-match "\\(?:(\\(.*\\)):\\)?\\([^] \n\t\r]*\\)" link)
-    (let* ((library (kiwix-org-get-library link))
+    (let* ((library (org-kiwix-get-library link))
            (query (url-encode-url (or (match-string 2 link) description)))
            ;; "http://en.wikipedia.org/wiki/Linux"
            ;;         --
@@ -114,7 +122,7 @@
          ((eq format 'latex) (format "\\href{%s}{%s}" path desc))
          (t path))))))
 
-(defun org-wikipedia-store-link ()
+(defun org-kiwix-store-link ()
   "Store a link to a Wikipedia link."
   ;; [C-c o C-l l] `org-store-link'
   ;; remove those interactive functions. use normal function instead.
@@ -127,7 +135,7 @@
                             :description query)
       link)))
 
-(defun org-wikipedia-complete-link (&optional arg)
+(defun org-kiwix-complete-link (&optional arg)
   "Use kiwix AJAX request to provide available completion keywords."
   (let* ((query (or arg (read-from-minibuffer "Search keyword: ")))
          (library (kiwix-select-library))
@@ -140,11 +148,11 @@
 (defun org-kiwix-setup-link ()
   "Setup Org link for org-kiwix."
   (org-link-set-parameters "wikipedia" ; NOTE: use `wikipedia' for future backend changing.
-                           :follow #'org-wikipedia-open-link
-                           :store #'org-wikipedia-store-link
-                           :export #'org-wikipedia-export-link
-                           :complete #'org-wikipedia-complete-link)
-  (add-hook 'org-store-link-functions 'org-wikipedia-store-link))
+                           :follow #'org-kiwix-open-link
+                           :store #'org-kiwix-store-link
+                           :export #'org-kiwix-export-link
+                           :complete #'org-kiwix-complete-link)
+  (add-hook 'org-store-link-functions 'org-kiwix-store-link))
 
 
 
