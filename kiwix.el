@@ -6,8 +6,8 @@
 ;; Keywords: kiwix wikipedia
 ;; Homepage: https://github.com/stardiviner/kiwix.el
 ;; Created: 23th July 2016
-;; Version: 1.0.3
-;; Package-Requires: ((emacs "24.4") (request "0.3.0"))
+;; Version: 1.1.0
+;; Package-Requires: ((emacs "24.4") (request "0.3.0") (elquery "0.1.0"))
 
 ;; Copyright (C) 2019-2020  Free Software Foundation, Inc.
 
@@ -39,10 +39,14 @@
 ;; (use-package kiwix
 ;;   :ensure t
 ;;   :after org
+;;   :commands (kiwix-launch-server kiwix-at-point kiwix-search-at-library kiwix-search-full-context)
 ;;   :bind (:map document-prefix ("w" . kiwix-at-point))
-;;   :init (setq kiwix-server-use-docker t
-;;               kiwix-server-port 8080
-;;               kiwix-default-library "wikipedia_zh_all_2015-11.zim"))
+;;   :custom ((kiwix-server-type 'docker-remote)
+;;            (kiwix-server-url "http://192.168.31.251")
+;;            (kiwix-server-port 8089))
+;;   :hook (org-load . org-kiwix-setup-link)
+;;   :init (require 'org-kiwix)
+;;   :config (add-hook 'org-load-hook #'org-kiwix-setup-link))
 
 ;;;; Usage:
 ;;
@@ -57,6 +61,7 @@
 (require 'subr-x)
 (require 'thingatpt)
 (require 'json)
+(require 'elquery)
 
 (declare-function helm "helm")
 (declare-function helm-build-async-source "helm")
@@ -67,57 +72,48 @@
   "Kiwix customization options."
   :group 'kiwix)
 
-(defcustom kiwix-server-use-docker nil
-  "Using Docker container for kiwix-serve or not?"
-  :type 'boolean
-  :safe #'booleanp)
+(defcustom kiwix-zim-dir
+  (when (file-readable-p (expand-file-name "~/.www.kiwix.org/kiwix"))
+    (file-name-directory
+     (concat
+      (expand-file-name "~/.www.kiwix.org/kiwix")
+      (car (directory-files (expand-file-name "~/.www.kiwix.org/kiwix") nil ".*\\.default\\'")) ; profile folder name
+      "/data/library/*.zim")))
+  "The kiwix ZIM files directory."
+  :type 'string
+  :safe #'stringp)
+
+(defcustom kiwix-server-type 'docker-local
+  "Specify the kiwix-serve type.
+- 'docker-remote :: remote docker service
+- 'docker-local  :: local docker service
+- 'kiwix-serve-local :: local kiwix-serve service"
+  :type '(choice
+          (const :tag "Remote Docker Service" docker-remote)
+          (const :tag "Local Docker Service" docker-local)
+          (const :tag "Local kiwix-serve Service" kiwix-serve-local)))
+
+(defcustom kiwix-server-url "http://127.0.0.1"
+  "Specify Kiwix server URL."
+  :type 'string
+  :safe #'stringp)
 
 (defcustom kiwix-server-port 8000
   "Specify default kiwix-serve server port."
   :type 'number
   :safe #'numberp)
 
-(defcustom kiwix-server-url "http://127.0.0.1"
-  "Specify Kiwix server URL."
-  :type 'string)
-
 (defcustom kiwix-server-command
-  (cond
-   ((file-executable-p "/usr/bin/kiwix-serve") "/usr/bin/kiwix-serve")
-   ((eq system-type 'gnu/linux) "/usr/lib/kiwix/bin/kiwix-serve")
-   ((eq system-type 'darwin)
-    (warn "You need to specify Mac OS X Kiwix path. And send a PR to my repo."))
-   ((eq system-type 'windows-nt)
-    (warn "You need to specify Windows Kiwix path. And send a PR to my repo.")))
+  (when (eq kiwix-server-type 'kiwix-serve-local)
+    (cond
+     ((file-executable-p "/usr/bin/kiwix-serve") "/usr/bin/kiwix-serve")
+     ((eq system-type 'gnu/linux) "/usr/lib/kiwix/bin/kiwix-serve")
+     ((eq system-type 'darwin)
+      (warn "You need to specify Mac OS X Kiwix path. And send a PR to my repo."))
+     ((eq system-type 'windows-nt)
+      (warn "You need to specify Windows Kiwix path. And send a PR to my repo."))))
   "Specify kiwix server command."
   :type 'string)
-
-(defun kiwix-dir-detect ()
-  "Detect Kiwix profile directory exist."
-  (let ((kiwix-dir "~/.www.kiwix.org/kiwix"))
-    (if (and (file-directory-p kiwix-dir) (file-readable-p kiwix-dir))
-        kiwix-dir
-      (warn "ERROR: Kiwix profile directory \"~/.www.kiwix.org/kiwix\" is not accessible.")
-      nil)))
-
-(defcustom kiwix-default-data-profile-name
-  (when (kiwix-dir-detect)
-    (car (directory-files "~/.www.kiwix.org/kiwix" nil ".*\\.default\\'")))
-  "Specify the default Kiwix data profile path."
-  :type 'string)
-
-(defcustom kiwix-default-data-dir
-  (when (kiwix-dir-detect)
-    (concat "~/.www.kiwix.org/kiwix/" kiwix-default-data-profile-name))
-  "Specify the default Kiwix data directory."
-  :type 'string
-  :safe #'stringp)
-
-(defcustom kiwix-default-library-dir
-  (file-name-directory (concat kiwix-default-data-dir "/data/library/library.xml"))
-  "Kiwix libraries path."
-  :type 'string
-  :safe #'stringp)
 
 (defcustom kiwix-default-completing-read (cond
                                           ((fboundp 'consult--read) 'selectrum)
@@ -142,43 +138,58 @@ Set it to ‘t’ will use Emacs built-in ‘completing-read’."
           (const :tag "xwidget browser" xwidget-webkit-browse-url))
   :safe #'symbolp)
 
+
+(defvar kiwix-libraries ()
+  "A list of Kiwix libraries.")
+
 (defun kiwix--get-library-name (file)
   "Extract library name from library file."
   (replace-regexp-in-string "\\.zim\\'" "" file))
 
 (defun kiwix-get-libraries ()
   "Check out all available Kiwix libraries."
-  (when (kiwix-dir-detect)
-    (mapcar #'kiwix--get-library-name
-            (directory-files kiwix-default-library-dir nil ".*\\.zim\\'"))))
-
-(defvar kiwix-libraries (kiwix-get-libraries)
-  "A list of Kiwix libraries.")
-
-(defun kiwix-libraries-refresh ()
-  "A helper function to refresh available Kiwx libraries."
-  (setq kiwix-libraries (kiwix-get-libraries)))
-
-(defvar kiwix--selected-library nil
-  "Global variable of currently select library used in anonymous function.
-Like in function `kiwix-ajax-search-hints'.")
-
-;; - examples:
-;; - "wikipedia_en_all" - "wikipedia_en_all_2016-02"
-;; - "wikipedia_zh_all" - "wikipedia_zh_all_2015-17"
-;; - "wiktionary_en_all" - "wiktionary_en_all_2015-17"
-;; - "wiktionary_zh_all" - "wiktionary_zh_all_2015-17"
-;; - "wikipedia_en_medicine" - "wikipedia_en_medicine_2015-17"
+  (cond
+   ;; ZIM library files on remote Docker server, parse index HTML page.
+   ((eq kiwix-server-type 'docker-remote)
+    (let ((url (format "%s:%s" kiwix-server-url kiwix-server-port)))
+      (request url
+        :type "GET"
+        :sync t
+        :parser (lambda ()
+                  (let ((html (elquery-read-string (buffer-substring-no-properties (point-min) (point-max)))))
+                    (setq kiwix-libraries
+                          (mapcar
+                           ;; remove "/" from "/<zim_library_name>"
+                           (lambda (slash_library)
+                             (substring slash_library 1 nil))
+                           ;; extract plist values. list of "/<zim_library_name>"
+                           (mapcar 'cadr
+                                   ;; extract nodes properties in plist
+                                   (mapcar #'elquery-props
+                                           ;; return a list of elquery nodes
+                                           (elquery-children
+                                            ;; return the <div class="book__list">
+                                            (car (elquery-$ ".book__list" html)))))))
+                    (elquery-children (first (elquery-$ ".book__list" html)))))
+        :error (cl-function
+                (lambda (&rest args &key error-thrown &allow-other-keys)
+                  (message "Function kiwix-get-libraries error.")))
+        :success (cl-function
+                  (lambda (&key _data &allow-other-keys)
+                    _data))
+        :status-code '((404 . (lambda (&rest _) (message (format "Endpoint %s does not exist." url))))
+                       (500 . (lambda (&rest _) (message (format "Error from %s." url))))))))
+   ;; ZIM library files on local host, parse directory files.
+   ((or (eq kiwix-server-type 'kiwix-serve-local)
+        (eq kiwix-server-type 'docker-local))
+    (when (and (file-directory-p kiwix-zim-dir) (file-readable-p kiwix-zim-dir))
+      (mapcar #'kiwix--get-library-name
+              (directory-files kiwix-zim-dir nil ".*\\.zim\\'"))))))
 
 (defun kiwix-select-library (&optional filter)
   "Select Kiwix library name."
-  (kiwix-libraries-refresh)
+  (kiwix-get-libraries)
   (completing-read "Kiwix library: " kiwix-libraries nil t filter))
-
-(defcustom kiwix-default-library "wikipedia_en_all.zim"
-  "The default kiwix library when library fragment in link not specified."
-  :type 'string
-  :safe #'stringp)
 
 (defcustom kiwix-mode-prefix nil
   "Specify kiwix-mode keybinding prefix before loading."
@@ -191,23 +202,26 @@ Like in function `kiwix-ajax-search-hints'.")
   "Launch Kiwix server."
   (interactive)
   (let ((library-path kiwix-default-library-dir))
-    (if kiwix-server-use-docker
-        (start-process
-         "kiwix-server"
-         " *kiwix server*"
-         "docker"
-         "container" "run" "-d"
-         "--name" "kiwix-serve"
-         "-v" (concat (file-name-directory library-path) ":" "/data")
-         "kiwix/kiwix-serve"
-         "--library" "library.xml")
-      (start-process
-       "kiwix-server"
-       " *kiwix server*"
-       kiwix-server-command
-       "--port" (number-to-string kiwix-server-port)
-       "--daemon"
-       "--library" (concat library-path "library.xml")))))
+    (cl-case kiwix-server-type
+      ('docker-remote
+       (message "kiwix-serve service is started by user manually at other place."))
+      ('docker-local (start-process
+                      "kiwix-server"
+                      " *kiwix server*"
+                      "docker"
+                      "container" "run" "-d"
+                      "--name" "kiwix-serve"
+                      "-v" (concat (file-name-directory library-path) ":" "/data")
+                      "-p" (format "%s:80" kiwix-server-port)
+                      "kiwix/kiwix-serve"
+                      "--library" "library.xml"))
+      ('kiwix-serve-local (start-process
+                           "kiwix-server"
+                           " *kiwix server*"
+                           kiwix-server-command
+                           "--port" (number-to-string kiwix-server-port)
+                           "--daemon"
+                           "--library" (concat library-path "library.xml"))))))
 
 (defun kiwix-capitalize-first (string)
   "Only capitalize the first word of STRING."
@@ -215,8 +229,8 @@ Like in function `kiwix-ajax-search-hints'.")
 
 (defun kiwix-query (query &optional selected-library)
   "Search `QUERY' in `LIBRARY' with Kiwix."
-  (let* ((library (or selected-library (kiwix--get-library-name kiwix-default-library)))
-         (url (concat (format "%s:%s" kiwix-server-url (number-to-string kiwix-server-port))
+  (let* ((library (or selected-library (kiwix--get-library-name selected-library)))
+         (url (concat (format "%s:%s" kiwix-server-url kiwix-server-port)
                       "/search?content=" library "&pattern=" (url-hexify-string query)))
          (browse-url-browser-function kiwix-default-browser-function))
     (browse-url url)))
@@ -232,13 +246,14 @@ Like in function `kiwix-ajax-search-hints'.")
 (defvar kiwix-server-available? nil
   "The kiwix-server current available?")
 
+;;;###autoload
 (defun kiwix-ping-server ()
   "Ping Kiwix server to set `kiwix-server-available?' global state variable."
-  (and kiwix-server-use-docker
+  (and (eq kiwix-server-type 'docker-local)
        (or (kiwix-docker-check)
            (async-shell-command "docker pull kiwix/kiwix-serve")))
   (let ((inhibit-message t))
-    (request (format "%s:%s" kiwix-server-url (number-to-string kiwix-server-port))
+    (request (format "%s:%s" kiwix-server-url kiwix-server-port)
       :type "GET"
       :sync t
       :parser (lambda () (libxml-parse-html-region (point-min) (point-max)))
@@ -253,16 +268,15 @@ Like in function `kiwix-ajax-search-hints'.")
       :status-code '((404 . (lambda (&rest _) (message (format "Endpoint %s does not exist." url))))
                      (500 . (lambda (&rest _) (message (format "Error from  %s." url))))))))
 
-(defun kiwix-ajax-search-hints (input &optional selected-library)
+(defun kiwix--ajax-search-hints (input &optional selected-library)
   "Instantly AJAX request to get available Kiwix entry keywords
 list and return a list result."
   (kiwix-ping-server)
   (when (and input kiwix-server-available?)
     (let* ((library (or selected-library
-                        (kiwix--get-library-name (or kiwix--selected-library
-                                                     kiwix-default-library))))
+                        (kiwix--get-library-name selected-library)))
            (ajax-api (format "%s:%s/suggest?content=%s&term="
-                             kiwix-server-url (number-to-string kiwix-server-port)
+                             kiwix-server-url kiwix-server-port
                              library))
            (ajax-url (concat ajax-api input))
            (data (request-response-data
@@ -284,71 +298,85 @@ list and return a list result."
        (region-beginning) (region-end))
     (thing-at-point 'symbol)))
 
+(defun kiwix--ajax-select-available-hints (zim-library)
+  "AJAX search hints on the selected library and select one term from available hints."
+  (pcase kiwix-default-completing-read
+    ('selectrum
+     (require 'selectrum)
+     (require 'consult)
+     (consult--read
+      (lambda (input)
+        (apply #'kiwix--ajax-search-hints
+               input `(,zim-library)))
+      :prompt "Kiwix related entries: "
+      :require-match nil))
+    ('ivy
+     (require 'ivy)
+     (ivy-read
+      "Kiwix related entries: "
+      (lambda (input)
+        (apply #'kiwix--ajax-search-hints
+               input `(,zim-library)))
+      :predicate nil
+      :require-match nil
+      :initial-input (kiwix--get-thing-at-point)
+      :preselect nil
+      :def nil
+      :history nil
+      :keymap nil
+      :update-fn 'auto
+      :sort t
+      :dynamic-collection t
+      :caller 'ivy-done))
+    ('helm
+     (require 'helm)
+     (helm
+      :source (helm-build-async-source "kiwix-helm-search-hints"
+                :candidates-process
+                (lambda (input)
+                  (apply #'kiwix--ajax-search-hints
+                         input `(,zim-library))))
+      :input (kiwix--get-thing-at-point)
+      :buffer "*helm kiwix completion candidates*"))
+    (_
+     (completing-read
+      "Kiwix related entries: "
+      ;; FIXME: This needs work!
+      (completion-table-dynamic
+       (lambda (input)
+         (apply #'kiwix--ajax-search-hints
+                input `(,zim-library))))
+      nil nil
+      (kiwix--get-thing-at-point)))))
+
+;;;###autoload
+(defun kiwix-search-at-library (zim-library query)
+  "Search QUERY in selected ZIM library."
+  (interactive (let ((zim-library (kiwix-select-library)))
+                 (list zim-library (kiwix--ajax-select-available-hints zim-library))))
+  (message (format "library: %s, query: %s" zim-library query))
+  (if (or (null zim-library)
+          (string-empty-p zim-library)
+          (null query)
+          (string-empty-p query))
+      (error "Your query is invalid")
+    (kiwix-query query zim-library)))
+
+;;;###autoload
+(defun kiwix-search-full-context (query)
+  "Full context search QUERY in all kiwix ZIM libraries. It's very slow."
+  (interactive
+   (list (read-string "kiwix full context search in all libraries: ")))
+  (browse-url (format "%s:%s/search?pattern=%s" kiwix-server-url kiwix-server-port query)))
+
 ;;;###autoload
 (defun kiwix-at-point ()
-  "Search for the symbol at point with `kiwix-query'."
+  "Search for the symbol at point with `kiwix-search-at-library'."
   (interactive)
   (unless (kiwix-ping-server)
     (kiwix-launch-server))
   (if kiwix-server-available?
-      (progn
-        (setq kiwix--selected-library (kiwix-select-library))
-        (let* ((library kiwix--selected-library)
-               (query (pcase kiwix-default-completing-read
-                        ('selectrum
-                         (require 'selectrum)
-                         (require 'consult)
-                         (consult--read
-                          (lambda (input)
-                            (apply #'kiwix-ajax-search-hints
-                                   input `(,kiwix--selected-library)))
-                          :prompt "Kiwix related entries: "
-                          :require-match nil))
-                        ('ivy
-                         (require 'ivy)
-                         (ivy-read
-                          "Kiwix related entries: "
-                          (lambda (input)
-                            (apply #'kiwix-ajax-search-hints
-                                   input `(,kiwix--selected-library)))
-                          :predicate nil
-                          :require-match nil
-                          :initial-input (kiwix--get-thing-at-point)
-                          :preselect nil
-                          :def nil
-                          :history nil
-                          :keymap nil
-                          :update-fn 'auto
-                          :sort t
-                          :dynamic-collection t
-                          :caller 'ivy-done))
-                        ('helm
-                         (require 'helm)
-                         (helm
-                          :source (helm-build-async-source "kiwix-helm-search-hints"
-                                    :candidates-process
-                                    (lambda (input)
-                                      (apply #'kiwix-ajax-search-hints
-                                             input `(,kiwix--selected-library))))
-                          :input (kiwix--get-thing-at-point)
-                          :buffer "*helm kiwix completion candidates*"))
-                        (_
-                         (completing-read
-                          "Kiwix related entries: "
-                          ;; FIXME: This needs work!
-                          (completion-table-dynamic
-                           (lambda (input)
-                             (apply #'kiwix-ajax-search-hints
-                                    input `(,kiwix--selected-library))))
-                          nil nil
-                          (kiwix--get-thing-at-point))))))
-          (message (format "library: %s, query: %s" library query))
-          (if (or (null library)
-                  (string-empty-p library)
-                  (null query)
-                  (string-empty-p query))
-              (error "Your query is invalid")
-            (kiwix-query query library))))
+      (call-interactively 'kiwix-search-at-library)
     (warn "kiwix-serve is not available, please start it at first."))
   (setq kiwix-server-available? nil))
 
