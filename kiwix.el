@@ -7,7 +7,7 @@
 ;; Homepage: https://github.com/stardiviner/kiwix.el
 ;; Created: 23th July 2016
 ;; Version: 1.1.0
-;; Package-Requires: ((emacs "24.4") (request "0.3.0") (elquery "0.1.0"))
+;; Package-Requires: ((emacs "25.1") (request "0.3.0"))
 
 ;; Copyright (C) 2019-2020  Free Software Foundation, Inc.
 
@@ -61,7 +61,7 @@
 (require 'subr-x)
 (require 'thingatpt)
 (require 'json)
-(require 'elquery)
+(require 'dom)
 
 (declare-function helm "helm")
 (declare-function helm-build-async-source "helm")
@@ -156,21 +156,42 @@ Set it to ‘t’ will use Emacs built-in ‘completing-read’."
         :type "GET"
         :sync t
         :parser (lambda ()
-                  (let ((html (elquery-read-string (buffer-substring-no-properties (point-min) (point-max)))))
-                    (setq kiwix-libraries
-                          (mapcar
-                           ;; remove "/" from "/<zim_library_name>"
-                           (lambda (slash_library)
-                             (substring slash_library 1 nil))
-                           ;; extract plist values. list of "/<zim_library_name>"
-                           (mapcar 'cadr
-                                   ;; extract nodes properties in plist
-                                   (mapcar #'elquery-props
-                                           ;; return a list of elquery nodes
-                                           (elquery-children
-                                            ;; return the <div class="book__list">
-                                            (car (elquery-$ ".book__list" html)))))))
-                    (elquery-children (first (elquery-$ ".book__list" html)))))
+                  (cond
+                   ((libxml-available-p) ; (and (not (featurep 'elquery)) (libxml-available-p))
+                    (let ((document (libxml-parse-html-region (point-min) (point-max))))
+                      (setq kiwix-libraries
+                            (mapcar
+                             ;; remove "/" from "/<zim_library_name>"
+                             (lambda (slash_library)
+                               (substring slash_library 1 nil))
+                             ;; list of "/<zim_library_name>"
+                             (mapcar
+                              (lambda (a)
+                                (dom-attr a 'href))
+                              (dom-by-tag
+                               (dom-by-class
+                                (dom-by-class document "kiwix") ; <div class="kiwix">
+                                "book__list")                   ; <div class="book__list">
+                               'a)      ; <a href="/wikipedia_zh_all_maxi_2021-03">
+                              )))))
+                   ((featurep 'elquery)
+                    (require 'elquery)
+                    (let ((html (elquery-read-string
+                                 (buffer-substring-no-properties (point-min) (point-max)))))
+                      (setq kiwix-libraries
+                            (mapcar
+                             ;; remove "/" from "/<zim_library_name>"
+                             (lambda (slash_library)
+                               (substring slash_library 1 nil))
+                             ;; extract plist values. list of "/<zim_library_name>"
+                             (mapcar 'cadr
+                                     ;; extract nodes properties in plist
+                                     (mapcar #'elquery-props
+                                             ;; return a list of elquery nodes
+                                             (elquery-children
+                                              ;; return the <div class="book__list">
+                                              (car (elquery-$ ".book__list" html)))))))
+                      (elquery-children (first (elquery-$ ".book__list" html)))))))
         :error (cl-function
                 (lambda (&rest args &key error-thrown &allow-other-keys)
                   (message "Function kiwix-get-libraries error.")))
