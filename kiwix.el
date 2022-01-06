@@ -6,7 +6,7 @@
 ;; Keywords: kiwix wikipedia
 ;; Homepage: https://github.com/stardiviner/kiwix.el
 ;; Created: 23th July 2016
-;; Version: 1.1.4
+;; Version: 1.1.5
 ;; Package-Requires: ((emacs "25.1") (request "0.3.0"))
 
 ;; Copyright (C) 2019-2020  Free Software Foundation, Inc.
@@ -204,8 +204,9 @@ Set it to ‘t’ will use Emacs built-in ‘completing-read’."
    ((or (eq kiwix-server-type 'kiwix-serve-local)
         (eq kiwix-server-type 'docker-local))
     (when (and (file-directory-p kiwix-zim-dir) (file-readable-p kiwix-zim-dir))
-      (mapcar #'kiwix--get-library-name
-              (directory-files kiwix-zim-dir nil ".*\\.zim\\'"))))))
+      (setq kiwix-libraries
+            (mapcar #'kiwix--get-library-name
+                    (directory-files kiwix-zim-dir nil ".*\\.zim\\'")))))))
 
 (defun kiwix-select-library (&optional filter)
   "Select Kiwix library name."
