@@ -12,7 +12,7 @@ assistant" /></a>
 
 * Intro
 
-Searching offline Wikipedia through Kiwix.
+Searching offline Wikipedia through Kiwix in Emacs.
 
 [[kiwix.el Ivy async completion.png]]
 

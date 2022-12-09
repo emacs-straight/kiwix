@@ -93,6 +93,7 @@
                  (t link)))
          (url (concat
                kiwix-server-url
+               ":" (number-to-string kiwix-server-port)
                "/" library "/A/"
                ;; query need to be convert to URL encoding: "禅宗" https://zh.wikipedia.org/wiki/%E7%A6%85%E5%AE%97
                (url-encode-url
@@ -102,7 +103,8 @@
                  ;; only capitalize the first word. like: "meta-circular interpreter" -> "Meta-circular interpreter"
                  (kiwix-capitalize-first query)
                  nil nil))
-               ".html")))
+               ;; ".html"
+               )))
     ;; (prin1 (format "library: %s, query: %s, url: %s" library query url))
     (browse-url url)))
 

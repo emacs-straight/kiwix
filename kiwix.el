@@ -4,7 +4,7 @@
 ;; Author: stardiviner <numbchild@gmail.com>
 ;; Maintainer: stardiviner <numbchild@gmail.com>
 ;; Keywords: kiwix wikipedia
-;; Homepage: https://github.com/stardiviner/kiwix.el
+;; Homepage: https://repo.or.cz/kiwix.el.git
 ;; Created: 23th July 2016
 ;; Version: 1.1.5
 ;; Package-Requires: ((emacs "25.1") (request "0.3.0"))
@@ -32,7 +32,7 @@
 
 ;;;; Kiwix installation
 ;;
-;; https://github.com/stardiviner/kiwix.el/#install
+;; https://repo.or.cz/kiwix.el.git/README.org#install
 
 ;;;; Config:
 ;;
@@ -57,6 +57,7 @@
 
 
 (require 'cl-lib)
+(require 'url)
 (require 'request)
 (require 'subr-x)
 (require 'thingatpt)
@@ -93,6 +94,13 @@
           (const :tag "Local Docker Service" docker-local)
           (const :tag "Local kiwix-serve Service" kiwix-serve-local)))
 
+(defcustom kiwix-server-api-version "v2"
+  "The kiwix-serve homepage API version.
+- 3.1.0 :: v1
+- 3.2.0 :: v2"
+  :type 'string
+  :safe #'stringp)
+
 (defcustom kiwix-server-url "http://127.0.0.1"
   "Specify Kiwix server URL."
   :type 'string
@@ -116,6 +124,7 @@
   :type 'string)
 
 (defcustom kiwix-default-completing-read (cond
+                                          ((fboundp 'vertico--all-completions) 'vertico)
                                           ((fboundp 'consult--read) 'selectrum)
                                           ((fboundp 'ivy-read) 'ivy)
                                           ((fboundp 'helm) 'helm)
@@ -149,8 +158,65 @@ Set it to ‘t’ will use Emacs built-in ‘completing-read’."
 (defun kiwix-get-libraries ()
   "Check out all available Kiwix libraries."
   (cond
+   ;; http://192.168.31.251:8580/catalog/search?start=0&count=
+   ((and (eq kiwix-server-type 'docker-remote) (string-equal kiwix-server-api-version "v2"))
+    (let ((url (format "%s:%s/catalog/search?start=0&count=" kiwix-server-url kiwix-server-port)))
+      (request url
+        :type "GET"
+        :sync t
+        :parser (lambda ()
+                  (if (libxml-available-p)
+                      (let ((xml-data (libxml-parse-xml-region (point-min) (point-max))))
+                        (setq kiwix-libraries
+                              (remove-if 'null
+                                         (mapcar
+                                          (lambda (cons)
+                                            (when (and (listp cons) (eq (car cons) 'entry))
+                                              (let* ((entry-xml cons)
+                                                     (title (caddr (assq 'title entry-xml))) ; "title"
+                                                     (thumbnail-url (format "%s:%s/%s"
+                                                                            kiwix-server-url kiwix-server-port
+                                                                            (cdr (assq 'href (cadr (assq 'link entry-xml))))))
+                                                     (library-link-path (cdr
+                                                                         (assq 'href
+                                                                               (cadr
+                                                                                (seq-find
+                                                                                 (lambda (element)
+                                                                                   (if (and (listp element) (eq (car element) 'link))
+                                                                                       (if (string-equal (cdr (assq 'type (cadr element))) "text/html")
+                                                                                           element)))
+                                                                                 entry-xml)))))
+                                                     (library-filename (string-trim-left library-link-path "/")))
+                                                (propertize library-filename
+                                                            'display (concat
+                                                                      (when-let ((return-buffer (url-retrieve-synchronously thumbnail-url :silent)))
+                                                                        (unwind-protect
+                                                                            (let ((image-data (with-current-buffer return-buffer
+                                                                                                (goto-char (point-min))
+                                                                                                (search-forward "\n\n") ; skip HTTP response headers.
+                                                                                                (buffer-substring-no-properties (point) (point-max)))))
+                                                                              (kill-buffer return-buffer)
+                                                                              (propertize " "
+                                                                                          'display (create-image image-data nil t
+                                                                                                                 :ascent 'center
+                                                                                                                 :max-height (default-font-height))
+                                                                                          'read-only t))))
+                                                                      " "
+                                                                      (format "%s (%s)" title library-filename))
+                                                            'read-only t))))
+                                          xml-data))))))
+        :error (cl-function
+                (lambda (&rest args &key error-thrown &allow-other-keys)
+                  (message "Function kiwix-get-libraries error.")))
+        :success (cl-function
+                  (lambda (&key _data &allow-other-keys)
+                    _data))
+        :status-code '((404 . (lambda (&rest _) (message (format "Endpoint %s does not exist." url))))
+                       (500 . (lambda (&rest _) (message (format "Error from %s." url))))))))
+
    ;; ZIM library files on remote Docker server, parse index HTML page.
-   ((eq kiwix-server-type 'docker-remote)
+   ((and (eq kiwix-server-type 'docker-remote) (string-equal kiwix-server-api-version "v1"))
+    ;; http://192.168.31.251:8580
     (let ((url (format "%s:%s" kiwix-server-url kiwix-server-port)))
       (request url
         :type "GET"
@@ -261,11 +327,28 @@ Set it to ‘t’ will use Emacs built-in ‘completing-read’."
 
 (defun kiwix-query (query &optional selected-library)
   "Search `QUERY' in `LIBRARY' with Kiwix."
-  (let* ((library (or selected-library (kiwix--get-library-name selected-library)))
-         (url (concat (format "%s:%s" kiwix-server-url kiwix-server-port)
-                      "/search?content=" library "&pattern=" (url-hexify-string query)))
-         (browse-url-browser-function kiwix-default-browser-function))
-    (browse-url url)))
+  (cond
+   ;; http://192.168.31.251:8580/wikipedia_en_all_maxi_2021-03/A/Linux_kernel
+   ((and (eq kiwix-server-type 'docker-remote) (string-equal kiwix-server-api-version "v2"))
+    (let* ((library (or selected-library (kiwix--get-library-name selected-library)))
+           (url (concat (format "%s:%s" kiwix-server-url kiwix-server-port)
+                        "/" library "/A/" (replace-regexp-in-string " " "_" query)))
+           (browse-url-browser-function kiwix-default-browser-function))
+      (browse-url url)))
+   ;; http://192.168.31.251:8580/search?content=wikipedia_en_all_maxi_2021-03&pattern=Linux%20kernel
+   ((and (eq kiwix-server-type 'docker-remote) (string-equal kiwix-server-api-version "v1"))
+    (let* ((library (or selected-library (kiwix--get-library-name selected-library)))
+           (url (concat (format "%s:%s" kiwix-server-url kiwix-server-port)
+                        "/search?content=" library "&pattern=" (url-hexify-string query)))
+           (browse-url-browser-function kiwix-default-browser-function))
+      (browse-url url)))
+   ;; http://192.168.31.251:8580/search?content=wikipedia_en_all_maxi_2021-03&pattern=Linux%20kernel
+   (t
+    (let* ((library (or selected-library (kiwix--get-library-name selected-library)))
+           (url (concat (format "%s:%s" kiwix-server-url kiwix-server-port)
+                        "/search?content=" library "&pattern=" (url-hexify-string query)))
+           (browse-url-browser-function kiwix-default-browser-function))
+      (browse-url url)))))
 
 (defun kiwix-docker-check ()
   "Make sure Docker image 'kiwix/kiwix-server' is available."
@@ -285,6 +368,7 @@ Set it to ‘t’ will use Emacs built-in ‘completing-read’."
        (or (kiwix-docker-check)
            (async-shell-command "docker pull kiwix/kiwix-serve")))
   (let ((inhibit-message t))
+    ;; http://192.168.31.251:8580
     (request (format "%s:%s" kiwix-server-url kiwix-server-port)
       :type "GET"
       :sync t
@@ -307,6 +391,7 @@ list and return a list result."
   (when (and input kiwix-server-available?)
     (let* ((library (or selected-library
                         (kiwix--get-library-name selected-library)))
+           ;; http://192.168.31.251:8580/suggest?content=wikipedia_en_all_maxi_2021-03&term=linux
            (ajax-api (format "%s:%s/suggest?content=%s&term="
                              kiwix-server-url kiwix-server-port
                              library))
@@ -333,6 +418,15 @@ list and return a list result."
 (defun kiwix--ajax-select-available-hints (zim-library)
   "AJAX search hints on the selected library and select one term from available hints."
   (pcase kiwix-default-completing-read
+    ('vertico
+     (require 'vertico)
+     (require 'consult)
+     (consult--read
+      (lambda (input)
+        (apply #'kiwix--ajax-search-hints
+               input `(,zim-library)))
+      :prompt "Kiwix related entries: "
+      :require-match nil))
     ('selectrum
      (require 'selectrum)
      (require 'consult)
@@ -363,11 +457,12 @@ list and return a list result."
     ('helm
      (require 'helm)
      (helm
-      :source (helm-build-async-source "kiwix-helm-search-hints"
-                :candidates-process
-                (lambda (input)
-                  (apply #'kiwix--ajax-search-hints
-                         input `(,zim-library))))
+      :source (helm-build-async-source
+               "kiwix-helm-search-hints"
+               :candidates-process
+               (lambda (input)
+                 (apply #'kiwix--ajax-search-hints
+                        input `(,zim-library))))
       :input (kiwix--get-thing-at-point)
       :buffer "*helm kiwix completion candidates*"))
     (_
@@ -399,6 +494,7 @@ list and return a list result."
   "Full context search QUERY in all kiwix ZIM libraries. It's very slow."
   (interactive
    (list (read-string "kiwix full context search in all libraries: ")))
+  ;; http://192.168.31.251:8580/search?content=wikipedia_en_all_maxi_2021-03&pattern=Linux%20kernel
   (browse-url (format "%s:%s/search?pattern=%s" kiwix-server-url kiwix-server-port query)))
 
 ;;;###autoload
