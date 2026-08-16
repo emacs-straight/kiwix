@@ -153,8 +153,7 @@
                            :follow #'org-kiwix-open-link
                            :store #'org-kiwix-store-link
                            :export #'org-kiwix-export-link
-                           :complete #'org-kiwix-complete-link)
-  (add-hook 'org-store-link-functions 'org-kiwix-store-link))
+                           :complete #'org-kiwix-complete-link))
 
 
 
